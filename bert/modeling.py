@@ -46,6 +46,8 @@ PRETRAINED_MODEL_ARCHIVE_MAP = {
     'bert-base-multilingual-cased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-multilingual-cased.tar.gz",
     'bert-base-chinese': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-chinese.tar.gz",
     'spanbert-base-uncased': "https://dl.fbaipublicfiles.com/fairseq/models/spanbert_hf_base.tar.gz",
+    'chinese-lert-base': "https://s3.amazonaws.com/models.huggingface.co/hfl/chinese-lert-base.tar.gz",
+    'ernie-3.0-medium-zh': "https://s3.amazonaws.com/models.huggingface.co/nghuyong/ernie-3.0-medium-zh.tar.gz"
 }
 BERT_CONFIG_NAME = 'bert_config.json'
 TF_WEIGHTS_NAME = 'model.ckpt'
@@ -605,6 +607,9 @@ class BertPreTrainedModel(nn.Module):
         config = BertConfig.from_json_file(config_file)
         logger.info("Model config {}".format(config))
         # Instantiate model.
+        coref_task_config = kwargs.get("coref_task_config", {})
+        coref_task_config["model_load_path"] = pretrained_model_name_or_path
+        coref_task_config["bert_config_file"] = os.path.join(pretrained_model_name_or_path, "config.json")
         model = cls(config, *inputs, **kwargs)
         if state_dict is None and not from_tf:
             weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)

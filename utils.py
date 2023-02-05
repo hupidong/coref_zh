@@ -36,3 +36,10 @@ def save_model(model, save_path):
     torch.save(model_to_save.state_dict(), output_model_file)
     model_to_save.bert_config.to_json_file(output_config_file)
     model_to_save.tokenizer.save_vocabulary(save_path)
+
+
+def save_model_all(model, save_path):
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    model_save_path = os.path.join(save_path, "pytorch_model.pt")
+    torch.save(model, model_save_path)

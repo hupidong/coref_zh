@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from functools import cmp_to_key
 from tqdm import tqdm, trange
+from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 # 项目模块
 import utils
@@ -62,6 +63,8 @@ class CorefModel(BertPreTrainedModel):
         self.bert_config = modeling.BertConfig.from_json_file(self.config["bert_config_file"])
         self.tokenizer = BertTokenizer.from_pretrained(self.config['vocab_file'], do_lower_case=True)
         self.bert = BertModel(config=self.bert_config)
+        #self.tokenizer = AutoTokenizer.from_pretrained(self.config["model_load_path"], do_lower_case=True)
+        #self.bert = AutoModelForMaskedLM.from_pretrained(self.config["model_load_path"])
         self.dropout = nn.Dropout(self.config["dropout_rate"])
         self.emb_dim = self.bert_config.hidden_size*2 + int(self.config["use_features"])*20 + int(self.config["model_heads"])*self.bert_config.hidden_size
         self.slow_antecedent_dim = self.emb_dim*3 + int(self.config["use_metadata"])*40 + int(self.config["use_features"])*20 + int(self.config['use_segment_distance'])*20
@@ -142,7 +145,8 @@ class CorefModel(BertPreTrainedModel):
     def forward(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map):
         # bert_encoder最后一层输出
         emb_mention_doc, _ = self.bert(input_ids=input_ids, attention_mask=input_mask, output_all_encoded_layers=False)  # [batch_size, seg_len, hidden_size]
-
+        #emb_mention_doc = self.bert(input_ids=input_ids, attention_mask=input_mask, output_hidden_states=True)
+        #emb_mention_doc = emb_mention_doc["hidden_states"][-1]
         mention_doc = self.flatten_emb_by_sentence(emb_mention_doc, input_mask)    # [batch_size*seg_len, hidden_size]
         num_words = torch.tensor(mention_doc.shape[0])    # [batch_size*seg_len]
         # 根据最大子串长度，获得候选子串
@@ -275,7 +279,7 @@ class CorefModel(BertPreTrainedModel):
             examples = [json.loads(jsonline) for jsonline in f.readlines()]
         return examples
 
-    def tensorize_example(self, example, is_training):
+    def tensorize_example(self, example, is_training, is_predict=False):
         """样例处理"""
         clusters = example["clusters"]
 
@@ -298,7 +302,10 @@ class CorefModel(BertPreTrainedModel):
 
         input_ids, input_mask, speaker_ids = [], [], []
         for i, (sentence, speaker) in enumerate(zip(sentences, speakers)):
-            sent_input_ids = self.tokenizer.convert_tokens_to_ids(sentence)
+            if not is_predict:
+                sent_input_ids = self.tokenizer.convert_tokens_to_ids(sentence)
+            else:
+                sent_input_ids = sentence
             sent_input_mask = [1] * len(sent_input_ids)
             sent_speaker_ids = [speaker_dict.get(s, 3) for s in speaker]
             while len(sent_input_ids) < max_sentence_length:
@@ -320,16 +327,24 @@ class CorefModel(BertPreTrainedModel):
         genre = self.genres.get(doc_key[:2], 0)
 
         gold_starts, gold_ends = self.tensorize_mentions(gold_mentions)
-        example_tensors = (input_ids, input_mask, text_len, speaker_ids, genre, is_training,
-                           gold_starts, gold_ends, cluster_ids, sentence_map)
+        example_tensors = {"input_ids": input_ids,
+                           "input_mask": input_mask,
+                           "text_len": text_len,
+                           "speaker_ids": speaker_ids,
+                           "genre": genre,
+                           "is_training": is_training,
+                           "gold_starts": gold_starts,
+                           "gold_ends": gold_ends,
+                           "cluster_ids": cluster_ids,
+                           "sentence_map": sentence_map}
 
         if is_training and len(sentences) > self.config["max_training_sentences"]:
             if self.config['single_example']:
-                return self.truncate_example(*example_tensors)
+                return self.truncate_example(example_tensors)
             else:
                 offsets = range(self.config['max_training_sentences'], len(sentences),
                                 self.config['max_training_sentences'])
-                tensor_list = [self.truncate_example(*(example_tensors + (offset,))) for offset in offsets]
+                tensor_list = [self.truncate_example(example_tensors, offset) for offset in offsets]
                 return tensor_list
         else:
             return example_tensors
@@ -350,29 +365,28 @@ class CorefModel(BertPreTrainedModel):
             starts, ends = [], []
         return np.array(starts), np.array(ends)
 
-    def truncate_example(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends,
-                         cluster_ids, sentence_map, sentence_offset=None):
+    def truncate_example(self, example, sentence_offset=None):
         """截断句长"""
         max_training_sentences = self.config["max_training_sentences"]
-        num_sentences = input_ids.shape[0]
+        num_sentences = example["input_ids"].shape[0]
         assert num_sentences > max_training_sentences
 
         sentence_offset = random.randint(0, num_sentences - max_training_sentences) if sentence_offset is None \
                                                                                     else sentence_offset
-        word_offset = text_len[:sentence_offset].sum()
-        num_words = text_len[sentence_offset:sentence_offset + max_training_sentences].sum()
-        input_ids = input_ids[sentence_offset:sentence_offset + max_training_sentences, :]
-        input_mask = input_mask[sentence_offset:sentence_offset + max_training_sentences, :]
-        speaker_ids = speaker_ids[sentence_offset:sentence_offset + max_training_sentences, :]
-        text_len = text_len[sentence_offset:sentence_offset + max_training_sentences]
+        word_offset = example["text_len"][:sentence_offset].sum()
+        num_words = example["text_len"][sentence_offset:sentence_offset + max_training_sentences].sum()
+        example["input_ids"] = example["input_ids"][sentence_offset:sentence_offset + max_training_sentences, :]
+        example["input_mask"] = example["input_mask"][sentence_offset:sentence_offset + max_training_sentences, :]
+        example["speaker_ids"] = example["speaker_ids"][sentence_offset:sentence_offset + max_training_sentences, :]
+        example["text_len"] = example["text_len"][sentence_offset:sentence_offset + max_training_sentences]
 
-        sentence_map = sentence_map[word_offset: word_offset + num_words]
-        gold_spans = np.logical_and(gold_ends >= word_offset, gold_starts < word_offset + num_words)
-        gold_starts = gold_starts[gold_spans] - word_offset
-        gold_ends = gold_ends[gold_spans] - word_offset
-        cluster_ids = cluster_ids[gold_spans]
+        example["sentence_map"] = example["sentence_map"][word_offset: word_offset + num_words]
+        gold_spans = np.logical_and(example["gold_ends"] >= word_offset, example["gold_starts"] < word_offset + num_words)
+        example["gold_starts"] = example["gold_starts"][gold_spans] - word_offset
+        example["gold_ends"] = example["gold_ends"][gold_spans] - word_offset
+        example["cluster_ids"] = example["cluster_ids"][gold_spans]
 
-        return input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map
+        return example
 
     def flatten_emb_by_sentence(self, emb, text_len_mask):
         """根据mask展平embedding"""
@@ -667,7 +681,7 @@ class CorefModel(BertPreTrainedModel):
 
     def load_eval_data(self):
         if self.eval_data is None:
-            with open(self.config["eval_path"]) as f:
+            with open(self.config["eval_path"], 'r', encoding='utf8') as f:
                 self.eval_data = [json.loads(jsonline) for jsonline in f.readlines()]
 
             print("Loaded {} eval examples.".format(len(self.eval_data)))
@@ -683,16 +697,16 @@ class CorefModel(BertPreTrainedModel):
             for example_num, example in enumerate(tqdm(self.eval_data, desc="Eval_Examples")):
                 tensorized_example = model.tensorize_example(example, is_training=False)
 
-                input_ids = torch.from_numpy(tensorized_example[0]).long().to(device)
-                input_mask = torch.from_numpy(tensorized_example[1]).long().to(device)
-                text_len = torch.from_numpy(tensorized_example[2]).long().to(device)
-                speaker_ids = torch.from_numpy(tensorized_example[3]).long().to(device)
-                genre = torch.tensor(tensorized_example[4]).long().to(device)
-                is_training = tensorized_example[5]
-                gold_starts = torch.from_numpy(tensorized_example[6]).long().to(device)
-                gold_ends = torch.from_numpy(tensorized_example[7]).long().to(device)
-                cluster_ids = torch.from_numpy(tensorized_example[8]).long().to(device)
-                sentence_map = torch.Tensor(tensorized_example[9]).long().to(device)
+                input_ids = torch.from_numpy(tensorized_example["input_ids"]).long().to(device)
+                input_mask = torch.from_numpy(tensorized_example["input_mask"]).long().to(device)
+                text_len = torch.from_numpy(tensorized_example["text_len"]).long().to(device)
+                speaker_ids = torch.from_numpy(tensorized_example["speaker_ids"]).long().to(device)
+                genre = torch.tensor(tensorized_example["genre"]).long().to(device)
+                is_training = tensorized_example["is_training"]
+                gold_starts = torch.from_numpy(tensorized_example["gold_starts"]).long().to(device)
+                gold_ends = torch.from_numpy(tensorized_example["gold_ends"]).long().to(device)
+                cluster_ids = torch.from_numpy(tensorized_example["cluster_ids"]).long().to(device)
+                sentence_map = torch.Tensor(tensorized_example["sentence_map"]).long().to(device)
 
                 if keys is not None and example['doc_key'] not in keys:
                     continue
