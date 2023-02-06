@@ -1,3 +1,5 @@
+import json
+
 import torch
 from torch import nn
 import pyhocon, os, errno
@@ -43,3 +45,12 @@ def save_model_all(model, save_path):
         os.makedirs(save_path)
     model_save_path = os.path.join(save_path, "pytorch_model.pt")
     torch.save(model, model_save_path)
+
+
+def save2json(obj, save_path, indent=None):
+    with open(save_path, 'w', encoding='utf8') as f:
+        json.dump(obj, f, ensure_ascii=False, indent=indent)
+
+def load_json_data(data_path):
+    with open(data_path, 'r', encoding='utf8') as f:
+        return json.load(f)

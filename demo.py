@@ -17,6 +17,7 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM, BertForMaskedLM, B
 import torch
 import torch.optim as optim
 from tqdm import tqdm, trange
+from tqdm.contrib import tzip
 
 from bert.tokenization import BertTokenizer
 import utils
@@ -82,7 +83,8 @@ def train_coref(config):
     accumulated_loss = 0.0
 
     for _ in trange(int(config["num_epochs"]), desc="Epoch"):
-        random.shuffle(examples)
+        if config.shuffle_train:
+            random.shuffle(examples)
         for step, example in enumerate(tqdm(examples, desc="Train_Examples")):
             tensorized_example = model.tensorize_example(example, is_training=True)
 
@@ -284,9 +286,16 @@ def online_test_coref(config, input_text):
         sentences = [tokenized_example["input_ids"]]
         offset_mappings = [tokenized_example["offset_mapping"]]
         """
+        """
         sentences = [['[CLS]'] + tokenizer.tokenize_not_UNK(text) + ['[SEP]']]
         tokens = sentences
         sentences = [tokenizer.convert_tokens_to_ids(sentences[0])]
+        """
+
+        tokenized_example = tokenizer.encode_not_UNK(text=text, add_special_tokens=True, output_offset_mapping=True)
+        sentences = [tokenized_example["input_ids"]]
+        tokens = [['[CLS]'] + tokenizer.tokenize_not_UNK(text) + ['[SEP]']]
+        offset_mappings = [tokenized_example["offset_mapping"]]
 
         sentence_map = [0] * len(sentences[0])
         speakers = [["-" for _ in sentence] for sentence in sentences]
@@ -295,12 +304,12 @@ def online_test_coref(config, input_text):
             "doc_key": "bn",
             "clusters": [],
             "sentences": sentences,
-            "text": text,
+            "text": [text],
             "tokens": tokens,
             "speakers": speakers,
             'sentence_map': sentence_map,
-            'subtoken_map': subtoken_map
-            #"offset_mappings": offset_mappings
+            'subtoken_map': subtoken_map,
+            "offset_mappings": offset_mappings
         }
 
     tokenizer = BertTokenizer.from_pretrained(config['vocab_file'], do_lower_case=True)
@@ -342,23 +351,32 @@ def online_test_coref(config, input_text):
             example["predicted_clusters"], _ = model.get_predicted_clusters(top_span_starts, top_span_ends,
                                                                             predicted_antecedents)
             # 索引——>文字
+            """
             example_sentence = utils.flatten(example["tokens"])
             """
-            example_sentence = utils.flatten(tokenizer.decode(example["sentences"][0]))
+
+            example_sentence = example["text"][0]
             example["predicted_clusters"] = get_spans_char_level(example["predicted_clusters"], example["offset_mappings"][0])
-            """
+
             predicted_list = []
             for same_entity in example["predicted_clusters"]:
                 same_entity_list = []
                 num_same_entity = len(same_entity)
                 for index in range(num_same_entity):
+                    """
                     entity_name = ''.join(example_sentence[same_entity[index][0]: same_entity[index][1] + 1])
-
-                    #tokens = example_sentence[same_entity[index][0]: same_entity[index][1] + 1]
-                    ##tokens = [token[2:] if re.fullmatch("""^##\w+""", token) else token for token in tokens]
-                    #entity_name = ''.join(tokens)
-
                     same_entity_list.append(entity_name)
+                    """
+                    """
+                    tokens = example_sentence[same_entity[index][0]: same_entity[index][1] + 1]
+                    #tokens = [token[2:] if re.fullmatch("^##\w+", token) else token for token in tokens]
+                    entity_name = ''.join(tokens)
+                    same_entity_list.append(entity_name)
+                    """
+
+                    entity_name = example_sentence[same_entity[index][0]: same_entity[index][1]]
+                    same_entity_list.append(entity_name)
+
                 predicted_list.append(same_entity_list)
                 same_entity_list = []  # 清空list
             example["predicted_idx2entity"] = predicted_list
@@ -368,6 +386,7 @@ def online_test_coref(config, input_text):
 
             output_file.write(json.dumps(example, ensure_ascii=False))
             output_file.write("\n")
+    return example
 
 def get_spans_char_level(spans, offset_map):
     sentence_id = []
@@ -389,6 +408,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="bert-base-chinese", type=str, help="base pretrained model")
     parser.add_argument("--from_checkpoint", action="store_true")
+    parser.add_argument("--shuffle_train", action="store_true")
     args = parser.parse_args()
 
     # run_experiment = "bert_base_chinese"
@@ -397,6 +417,7 @@ if __name__ == "__main__":
     run_experiment = args.config
     config = utils.read_config(run_experiment, "experiments.conf")
     config["from_checkpoint"] = args.from_checkpoint
+    config["shuffle_train"] = args.shuffle_train
     report_frequency = config["report_frequency"]
     eval_frequency = config["eval_frequency"]
 
@@ -423,15 +444,32 @@ if __name__ == "__main__":
 
     # 单句样本测试
     if config["do_one_example_test"]:
-        with open("data/predict/text.txt", 'r', encoding='utf8') as f:
-            texts = f.readlines()
+        """
+        # with open("data/predict/text.txt", 'r', encoding='utf8') as f:
+        #     texts = f.readlines()
+        # texts = [text.strip().replace('“', '"').replace('”', '"').replace('…', '...').replace('—', '-') for text in texts]
+        # texts = [unicodedata.normalize("NFKC", text) for text in texts]
+        # # input_text = "我的偶像是姚明，他喜欢打篮球，他的老婆叫叶莉。"
+        # # input_text = "百邦科技：达安世纪协议转让约651万股完成过户 百邦科技(SZ 300736，收盘价：10.08元)7月25日晚间发布公告称，达安世纪于2022年7月2日与刘一苇先生签署了《股份转让协议》，拟将其持有的约651万股公司无限售条件流通股转让给刘一苇先生，占公司总股本5.15%，转让价格为8.1元/股，转让价款总计人民币约5270万元。中国证券登记结算有限责任公司深圳分公司出具的《证券过户登记确认书》。 2021年1至12月份，百邦科技的营业收入构成为：居民服务和修理及其他服务业占比97.18%。 百邦科技的总经理、董事长均是刘铁峰，男，50岁，学历背景为硕士。 截至发稿，百邦科技市值为13亿元。"
+        # input_text = "黎明， 性别男，汉族，中国公民，他在1987年6月出生在山东省聊城市。"
+        # 
+        # for i, text in enumerate(tqdm(texts)):
+        #     text = text[0: config["max_segment_len"] - 2]
+        #     config['online_output_path'] = f"data/predict/{i}.jsonl"
+        #     online_test_coref(config, text)
+        """
+
+        examples = utils.load_json_data("data/predict/v2/coreference.json")
+        texts = [example["query"] for example in examples]
         texts = [text.strip().replace('“', '"').replace('”', '"').replace('…', '...').replace('—', '-') for text in texts]
         texts = [unicodedata.normalize("NFKC", text) for text in texts]
-        # input_text = "我的偶像是姚明，他喜欢打篮球，他的老婆叫叶莉。"
-        # input_text = "百邦科技：达安世纪协议转让约651万股完成过户 百邦科技(SZ 300736，收盘价：10.08元)7月25日晚间发布公告称，达安世纪于2022年7月2日与刘一苇先生签署了《股份转让协议》，拟将其持有的约651万股公司无限售条件流通股转让给刘一苇先生，占公司总股本5.15%，转让价格为8.1元/股，转让价款总计人民币约5270万元。中国证券登记结算有限责任公司深圳分公司出具的《证券过户登记确认书》。 2021年1至12月份，百邦科技的营业收入构成为：居民服务和修理及其他服务业占比97.18%。 百邦科技的总经理、董事长均是刘铁峰，男，50岁，学历背景为硕士。 截至发稿，百邦科技市值为13亿元。"
-        input_text = "黎明， 性别男，汉族，中国公民，他在1987年6月出生在山东省聊城市。"
 
-        for i, text in enumerate(tqdm(texts)):
+        for text, example in tzip(texts, examples):
             text = text[0: config["max_segment_len"] - 2]
-            config['online_output_path'] = f"data/predict/{i}.jsonl"
-            online_test_coref(config, text)
+            result = online_test_coref(config, text)
+            example["coref"] = {"text": result["text"][0],
+                                "clusters": result["predicted_clusters"],
+                                "clusters_strings": result["predicted_idx2entity"]}
+            utils.save2json(examples, save_path="data/predict/v2/coref_results.json")
+
+

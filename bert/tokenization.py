@@ -19,6 +19,8 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 import collections
 import logging
 import os
+import re
+
 import unicodedata
 from io import open
 
@@ -103,11 +105,13 @@ class BertTokenizer(object):
             [(ids, tok) for tok, ids in self.vocab.items()])
         self.do_basic_tokenize = do_basic_tokenize
         if do_basic_tokenize:
-          self.basic_tokenizer = BasicTokenizer(do_lower_case=do_lower_case,
-                                                never_split=never_split)
+            self.basic_tokenizer = BasicTokenizer(do_lower_case=do_lower_case,
+                                                  never_split=never_split)
         self.wordpiece_tokenizer = WordpieceTokenizer(vocab=self.vocab)
         self.wordpiece_tokenizer_not_UNK = WordpieceTokenizer_not_UNK(vocab=self.vocab)
         self.max_len = max_len if max_len is not None else int(1e12)
+        self.special_tokens = never_split
+        self.do_lower_case = do_lower_case
 
     def tokenize(self, text):
         split_tokens = []
@@ -120,6 +124,7 @@ class BertTokenizer(object):
         return split_tokens
 
     '''此处修改:加入了对UNK的处理'''
+
     def tokenize_not_UNK(self, text):
         split_tokens = []
         if self.do_basic_tokenize:
@@ -129,6 +134,48 @@ class BertTokenizer(object):
         else:
             split_tokens = self.wordpiece_tokenizer.tokenize(text)
         return split_tokens
+
+    def _get_offset_mapping(self, text, tokens):
+        if self.do_lower_case:
+            text = text.lower()
+        offset_mapping = []
+        idx_substring = 0
+        for token in tokens:
+            if token in self.special_tokens:
+                offset_mapping.append((0, 0))
+                continue
+            if token.startswith("##"):
+                token = token[2:]
+            token_len = len(token)
+            idx_token = text.index(token[0], idx_substring)
+            offset_mapping.append((idx_token, idx_token + token_len))
+            if idx_token == idx_substring:
+                idx_substring += token_len
+            else:
+                idx_substring = idx_token + token_len
+        return offset_mapping
+
+    def encode(self, text, add_special_tokens=True, output_offset_mapping=False):
+        tokens = self.tokenize(text)
+        if add_special_tokens:
+            tokens = ["CLS"] + tokens + ["SEP"]
+        ids = self.convert_tokens_to_ids(tokens)
+        offset_mapping = None
+        if output_offset_mapping:
+            offset_mapping = self._get_offset_mapping(text=text, tokens=tokens)
+        return {"input_ids": ids,
+                "offset_mapping": offset_mapping}
+
+    def encode_not_UNK(self, text, add_special_tokens=True, output_offset_mapping=False):
+        tokens = self.tokenize_not_UNK(text)
+        if add_special_tokens:
+            tokens = ['[CLS]'] + tokens + ['[SEP]']
+        ids = self.convert_tokens_to_ids(tokens)
+        offset_mapping = None
+        if output_offset_mapping:
+            offset_mapping = self._get_offset_mapping(text=text, tokens=tokens)
+        return {"input_ids": ids,
+                "offset_mapping": offset_mapping}
 
     def convert_tokens_to_ids(self, tokens):
         """Converts a sequence of tokens into ids using the vocab."""
